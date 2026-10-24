@@ -20,9 +20,15 @@ enum Snapshot {
         let state = DropPanelController.shared.state
         state.urls = files
         state.actions = AppModel.shared.actions(for: files)
+        (state.ringActions, state.usingDefaults) = DropPanelController.ringActions(for: files, available: state.actions)
         state.category = DropPanelController.preferredCategory(for: files, among: state.categories)
-        let probe = NSHostingView(rootView: PanelView(state: state, close: {}).frame(width: 660))
-        save(PanelView(state: state, close: {}).frame(width: 660), size: NSSize(width: 660, height: probe.fittingSize.height),
+        state.phase = .ring
+        let side = RingView.diameter(for: state.ringActions.count + 1)
+        save(PanelView(state: state, close: {}), size: NSSize(width: side, height: side), to: dir.appendingPathComponent("ring.png"))
+        state.phase = .grid
+        let w = DropPanelController.shared.gridWidth
+        let probe = NSHostingView(rootView: PanelView(state: state, close: {}).frame(width: w))
+        save(PanelView(state: state, close: {}).frame(width: w), size: NSSize(width: w, height: probe.fittingSize.height),
              to: dir.appendingPathComponent("panel.png"))
         exit(0)
     }

@@ -59,12 +59,15 @@ final class DragMonitor {
 
 @MainActor
 final class PanelState: ObservableObject {
-    enum Phase { case choosing, working(Job) }
+    enum Phase { case ring, grid, working(Job) }
     @Published var urls: [URL] = []
     @Published var actions: [FileAction] = []
+    @Published var ringActions: [FileAction] = []
+    @Published var usingDefaults = false
     @Published var category: ActionCategory = .image
-    @Published var phase: Phase = .choosing
+    @Published var phase: Phase = .ring
 
+    var isChoosing: Bool { if case .working = phase { return false }; return true }
     var categories: [ActionCategory] {
         ActionCategory.allCases.filter { c in actions.contains { $0.category == c } }
     }
@@ -84,60 +87,112 @@ final class DropPanelController {
     let state = PanelState()
     private lazy var panel: FloatingPanel = makePanel()
     private var hideWork: DispatchWorkItem?
-    private let width: CGFloat = 660
+    private var anchor = NSPoint.zero
+    let gridWidth: CGFloat = 660
 
     private func makePanel() -> FloatingPanel {
-        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 300),
+        let p = FloatingPanel(contentRect: NSRect(x: 0, y: 0, width: gridWidth, height: 300),
                               styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .popUpMenu
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         p.isOpaque = false
         p.backgroundColor = .clear
-        p.hasShadow = true
+        p.hasShadow = false // the SwiftUI views draw their own shadow so the ring stays round
         p.hidesOnDeactivate = false
         p.isReleasedWhenClosed = false
-        p.isMovableByWindowBackground = true
         let host = NSHostingView(rootView: PanelView(state: state, close: { [weak self] in self?.hide() }))
         host.autoresizingMask = [.width, .height]
         p.contentView = host
         return p
     }
 
+    /// Shows the favorites ring centered on the cursor.
     func show(for urls: [URL], near point: NSPoint) {
         hideWork?.cancel()
         if case .working(let job) = state.phase, job.isRunning { return } // don't interrupt a running job
+        anchor = point
         state.urls = urls
         state.actions = AppModel.shared.actions(for: urls)
+        let (ring, defaults) = Self.ringActions(for: urls, available: state.actions)
+        state.ringActions = ring
+        state.usingDefaults = defaults
         state.category = Self.preferredCategory(for: urls, among: state.categories)
-        state.phase = .choosing
+        state.phase = .ring
 
-        let height = idealHeight()
-        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
-        let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        var x = point.x - width / 2
-        var y = point.y + 28 // panel sits just above the cursor
-        if y + height > vis.maxY { y = point.y - height - 28 } // or below if there's no room
-        x = min(max(x, vis.minX + 8), vis.maxX - width - 8)
-        y = min(max(y, vis.minY + 8), vis.maxY - height - 8)
-        panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        let side = RingView.diameter(for: ring.count + 1)
+        place(NSRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side), animated: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { $0.duration = 0.12; panel.animator().alphaValue = 1 }
     }
 
+    /// Favorites that apply to these files; falls back to sensible picks for the file type.
+    static func ringActions(for urls: [URL], available: [FileAction]) -> ([FileAction], Bool) {
+        let ids = Set(available.map(\.id))
+        let favs = AppModel.shared.favorites.filter(ids.contains)
+        if !favs.isEmpty {
+            return (favs.prefix(12).compactMap { id in available.first { $0.id == id } }, false)
+        }
+        let picks = defaultRing[FileKind.of(urls[0])] ?? []
+        var list = picks.compactMap { id in available.first { $0.id == id } }
+        for a in available where list.count < 6 && !list.contains(where: { $0.id == a.id }) { list.append(a) }
+        return (Array(list.prefix(8)), true)
+    }
+
+    static let defaultRing: [FileKind: [String]] = {
+        let doc = ["doc.to.pdf", "doc.to.docx", "doc.to.html", "doc.to.md", "doc.to.txt", "doc.speak"]
+        let data = ["data.json", "data.yaml", "data.csv", "data.plist", "data.pretty", "data.htmltable"]
+        return [
+            .image: ["image.to.png", "image.to.jpg", "image.to.heic", "image.to.webp", "image.pdf", "image.compress", "image.resize50", "image.removebg"],
+            .svg: ["image.to.png", "image.to.jpg", "image.pdf", "image.icns"],
+            .video: ["video.mp4", "video.hevc", "video.gif", "audio.m4a", "audio.mp3", "video.720", "video.frame"],
+            .audio: ["audio.mp3", "audio.m4a", "audio.wav", "audio.flac", "audio.alac", "audio.voice"],
+            .pdf: ["pdf.to.png", "pdf.compress", "pdf.merge", "doc.to.docx", "doc.to.txt", "util.ocr"],
+            .document: doc, .markdown: doc, .html: doc, .plainText: doc,
+            .json: data, .yaml: data, .plist: data, .csv: data, .tsv: data,
+            .xml: ["data.xmlpretty", "data.validate", "archive.zip"],
+            .archive: ["archive.extract", "archive.list", "util.sha256"],
+            .folder: ["archive.zip", "archive.dmg", "archive.txz", "util.copypath"],
+            .other: ["archive.zip", "util.sha256", "util.copypath", "util.base64"],
+        ]
+    }()
+
+    /// Spring-loaded "More": switch from the ring to the full grid near the cursor.
+    func expandToGrid() {
+        guard case .ring = state.phase else { return }
+        state.phase = .grid
+        let height = gridHeight()
+        var rect = NSRect(x: anchor.x - gridWidth / 2, y: anchor.y - height / 2, width: gridWidth, height: height)
+        if let vis = screen(for: anchor)?.visibleFrame, rect.height > vis.height - 16 { rect.size.height = vis.height - 16 }
+        place(rect, animated: true)
+    }
+
     /// Tallest layout across categories so the panel doesn't jump while you hover tabs.
-    private func idealHeight() -> CGFloat {
+    private func gridHeight() -> CGFloat {
         let original = state.category
         var best: CGFloat = 200
         for c in state.categories {
             state.category = c
-            let probe = NSHostingView(rootView: PanelView(state: state, close: {}).frame(width: width))
+            let probe = NSHostingView(rootView: PanelView(state: state, close: {}).frame(width: gridWidth))
             best = max(best, probe.fittingSize.height)
         }
         state.category = original
-        let maxH = (NSScreen.main?.visibleFrame.height ?? 900) * 0.8
-        return min(best, maxH)
+        return best
+    }
+
+    private func screen(for point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main
+    }
+
+    /// Clamp to the visible screen area and apply.
+    private func place(_ rect: NSRect, animated: Bool) {
+        var r = rect
+        if let vis = screen(for: anchor)?.visibleFrame {
+            r.origin.x = min(max(r.minX, vis.minX + 4), vis.maxX - r.width - 4)
+            r.origin.y = min(max(r.minY, vis.minY + 4), vis.maxY - r.height - 4)
+        }
+        panel.setFrame(r, display: true, animate: animated)
     }
 
     static func preferredCategory(for urls: [URL], among cats: [ActionCategory]) -> ActionCategory {
@@ -160,6 +215,8 @@ final class DropPanelController {
         hideWork?.cancel()
         let job = AppModel.shared.run(action, on: urls)
         state.phase = .working(job)
+        let w: CGFloat = 440, h: CGFloat = 150
+        place(NSRect(x: anchor.x - w / 2, y: anchor.y - h / 2, width: w, height: h), animated: false)
         scheduleAutoHide(after: job)
     }
 
@@ -180,7 +237,7 @@ final class DropPanelController {
     func dragEnded() {
         // Give the drop handler a moment to fire before deciding the drag was cancelled.
         let work = DispatchWorkItem { [weak self] in
-            guard let self, case .choosing = self.state.phase else { return }
+            guard let self, self.state.isChoosing else { return }
             self.hide()
         }
         hideWork = work
@@ -192,7 +249,7 @@ final class DropPanelController {
         NSAnimationContext.runAnimationGroup({ $0.duration = 0.15; panel.animator().alphaValue = 0 }) {
             MainActor.assumeIsolated {
                 self.panel.orderOut(nil)
-                self.state.phase = .choosing
+                self.state.phase = .ring
             }
         }
     }
@@ -206,15 +263,22 @@ struct PanelView: View {
     let close: () -> Void
 
     var body: some View {
-        Group {
-            switch state.phase {
-            case .choosing: chooser
-            case .working(let job): JobStatusView(job: job, close: close)
-            }
+        switch state.phase {
+        case .ring:
+            RingView(state: state)
+        case .grid:
+            card { chooser }
+        case .working(let job):
+            card { JobStatusView(job: job, close: close) }
+                .frame(maxHeight: .infinity, alignment: .center)
         }
-        .padding(14)
-        .background(VisualEffect().clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous)))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.15)))
+    }
+
+    private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        content()
+            .padding(14)
+            .background(VisualEffect().clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous)))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(.white.opacity(0.15)))
     }
 
     private var chooser: some View {
@@ -244,6 +308,96 @@ struct PanelView: View {
                     DropPanelController.shared.perform(action, on: urls)
                 }, compact: true, favorites: model.favorites)
                 .id(state.category)
+            }
+        }
+    }
+}
+
+/// Favorite formats arranged in a circle around the dragged file.
+struct RingView: View {
+    @ObservedObject var state: PanelState
+    static let bubble: CGFloat = 66
+
+    /// Radius that keeps `count` bubbles from overlapping.
+    static func radius(for count: Int) -> CGFloat {
+        max(78, CGFloat(count) * (bubble + 8) / (2 * .pi))
+    }
+    static func diameter(for count: Int) -> CGFloat { (radius(for: count) + bubble / 2 + 18) * 2 }
+
+    var body: some View {
+        let items = state.ringActions.map { RingItem.action($0) } + [.more]
+        let r = Self.radius(for: items.count)
+        let d = Self.diameter(for: items.count)
+        ZStack {
+            // Round translucent backdrop.
+            VisualEffect()
+                .clipShape(Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.18)))
+                .frame(width: d - 8, height: d - 8)
+                .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
+            // Hub: the file being dragged.
+            VStack(spacing: 2) {
+                FileStack(urls: state.urls).frame(width: 34, height: 34)
+                Text(state.urls.count == 1 ? state.urls[0].pathExtension.uppercased() : "\(state.urls.count) files")
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                if state.usingDefaults {
+                    Text("Suggested").font(.system(size: 8)).foregroundStyle(.tertiary)
+                }
+            }
+            ForEach(Array(items.enumerated()), id: \.offset) { i, item in
+                let angle = -Double.pi / 2 + 2 * Double.pi * Double(i) / Double(items.count)
+                RingBubble(item: item)
+                    .offset(x: CGFloat(cos(angle)) * r, y: CGFloat(sin(angle)) * r)
+            }
+        }
+        .frame(width: d, height: d)
+    }
+}
+
+enum RingItem {
+    case action(FileAction)
+    case more
+}
+
+struct RingBubble: View {
+    let item: RingItem
+    @Local private var targeted = false
+
+    var body: some View {
+        let (symbol, title, color): (String, String, Color) = {
+            switch item {
+            case .action(let a): return (a.symbol, a.title, a.category.color)
+            case .more: return ("ellipsis", "More", .gray)
+            }
+        }()
+        VStack(spacing: 2) {
+            Image(systemName: symbol).font(.system(size: 18, weight: .semibold))
+            Text(title).font(.system(size: 9.5, weight: .bold)).lineLimit(1).minimumScaleFactor(0.6)
+        }
+        .padding(.horizontal, 6)
+        .foregroundStyle(targeted ? .white : .primary)
+        .frame(width: RingView.bubble, height: RingView.bubble)
+        .background(Circle().fill(targeted ? color : color.opacity(0.28)))
+        .overlay(Circle().strokeBorder(color.opacity(targeted ? 1 : 0.55), lineWidth: targeted ? 2.5 : 1.2))
+        .scaleEffect(targeted ? 1.22 : 1)
+        .animation(.spring(response: 0.22, dampingFraction: 0.65), value: targeted)
+        .help({ if case .action(let a) = item { return a.detail }; return "All formats" }())
+        .contentShape(Circle())
+        .onTapGesture { if case .more = item { DropPanelController.shared.expandToGrid() } }
+        .onDrop(of: [.fileURL], isTargeted: $targeted) { providers in
+            switch item {
+            case .action(let action):
+                loadURLs(providers) { urls in if !urls.isEmpty { DropPanelController.shared.perform(action, on: urls) } }
+                return true
+            case .more:
+                return false
+            }
+        }
+        .onChange(of: targeted) { _, now in
+            // Spring-load "More": hovering it briefly opens every format.
+            guard now, case .more = item else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if targeted { DropPanelController.shared.expandToGrid() }
             }
         }
     }

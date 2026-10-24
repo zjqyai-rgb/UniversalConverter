@@ -34,9 +34,26 @@ struct ActionGrid: View {
                     Label(name, systemImage: symbol)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(color)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: tile, maximum: tile + 20), spacing: 6)], alignment: .leading, spacing: 6) {
-                        ForEach(items) { action in
-                            ActionTile(action: action, mode: mode, compact: compact, tint: color)
+                    if compact {
+                        // Eager rows: LazyVGrid under-reports its fitting height, which clipped the panel.
+                        let cols = 7
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(stride(from: 0, to: items.count, by: cols)), id: \.self) { start in
+                                HStack(spacing: 6) {
+                                    ForEach(items[start..<min(start + cols, items.count)]) { action in
+                                        ActionTile(action: action, mode: mode, compact: compact, tint: color)
+                                    }
+                                    ForEach(0..<(cols - min(cols, items.count - start)), id: \.self) { _ in
+                                        Color.clear.frame(maxWidth: .infinity, minHeight: 1)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: tile, maximum: tile + 20), spacing: 6)], alignment: .leading, spacing: 6) {
+                            ForEach(items) { action in
+                                ActionTile(action: action, mode: mode, compact: compact, tint: color)
+                            }
                         }
                     }
                 }
@@ -75,6 +92,11 @@ struct ActionTile: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(tint.opacity(hovering ? 0.9 : 0.25), lineWidth: hovering ? 2 : 1)
         )
+        .overlay(alignment: .topTrailing) {
+            if model.favorites.contains(action.id) {
+                Image(systemName: "star.fill").font(.system(size: 8)).foregroundStyle(.yellow).padding(5)
+            }
+        }
         .scaleEffect(hovering ? 1.07 : 1)
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: hovering)
         .help(action.detail)
@@ -86,7 +108,7 @@ struct ActionTile: View {
                 .onHover { hovering = $0 }
                 .onTapGesture { perform(action) }
                 .contextMenu {
-                    Button(model.favorites.contains(action.id) ? "Remove from Favorites" : "Add to Favorites") {
+                    Button(model.favorites.contains(action.id) ? "Remove from Shift-Drag Ring" : "Add to Shift-Drag Ring") {
                         model.toggleFavorite(action.id)
                     }
                 }
