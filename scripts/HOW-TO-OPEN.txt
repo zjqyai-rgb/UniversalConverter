@@ -1,0 +1,29 @@
+Universal Converter: install and first launch
+=============================================
+
+1. Drag "Universal Converter" onto the Applications folder.
+
+2. Open it from Applications. Because this app isn't from the App Store or
+   signed by an Apple-registered developer, macOS blocks it the first time:
+
+   - Click "Done" on the warning (don't move it to the Trash).
+   - Open System Settings > Privacy & Security, scroll down, and click
+     "Open Anyway" next to "Universal Converter was blocked". Confirm with
+     your password or Touch ID.
+
+   (On macOS 14 you can instead right-click the app > Open > Open.)
+
+   Terminal alternative:
+     xattr -dr com.apple.quarantine "/Applications/Universal Converter.app"
+
+3. Use it:
+   - Start dragging files in Finder, hold Shift, and drop onto a format in
+     the ring that appears around the file. Hover "More" for every format.
+   - Or drop files on the app window / Dock icon and click a format.
+   - Right-click any format in the window to add it to the Shift-drag ring.
+
+Everything converts on your Mac; nothing is uploaded.
+Requires macOS 14 or later, on Apple Silicon or Intel.
+
+Optional extras: installing Homebrew's ffmpeg and webp packages
+(brew install ffmpeg webp) adds MP3, OGG, Opus, WebM, MKV, AVI and WebP.
